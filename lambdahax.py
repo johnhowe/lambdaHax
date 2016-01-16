@@ -6,6 +6,7 @@ import os
 import sys
 import numpy as np
 
+
 def isLast(itr):
     old = itr.next()
     for new in itr:
@@ -14,15 +15,17 @@ def isLast(itr):
     yield True, old
 
 os.system('clear')
+np.set_printoptions(linewidth=2048, precision=2, nanstr='', suppress=True)
 
 maxEGO = 1.45
 minEGO = 0.55
 maxETE = 103
-minCHT = 70
-maxAbsDTPS = 0.0
+maxAbsDTPS = 0.5
+minChangeWeight = 100
 
 parser = argparse.ArgumentParser(description='Hacks at FreeEMS CSV files')
 parser.add_argument('logfile', nargs=1, help='FreeEMS CSV log file')
+parser.add_argument('-p', '--plot', help='Plot the output', action="store_true")
 
 args = parser.parse_args()
 
@@ -32,10 +35,29 @@ if args.logfile == None:
 
 logfilename = args.logfile[0]
 
-tableAccWeight = np.genfromtxt("basetable.csv", delimiter=',')
-tableAccLambda = np.genfromtxt("basetable.csv", delimiter=',')
-tableLambda = np.genfromtxt("basetable.csv", delimiter=',')
-np.set_printoptions(linewidth=160, precision=2, nanstr='', suppress=True)
+tableAxisRpmMax = 8000
+tableAxisRpmStep = 500
+
+tableAxisRpm = np.arange(0, tableAxisRpmMax+1, tableAxisRpmStep)
+
+tableAxisRpm = np.genfromtxt("rpmaxis.csv", delimiter=',')
+tableAxisMap = np.genfromtxt("mapaxis.csv", delimiter=',')
+tableVE = np.genfromtxt("ve.csv", delimiter=',')
+
+tableTemplate = np.zeros((tableAxisMap.shape[0]+1,tableAxisRpm.shape[0]+1))
+tableTemplate[1:tableTemplate.shape[0],0] = tableAxisMap
+tableTemplate[0,1:tableTemplate.shape[1]] = tableAxisRpm
+#print tableAxisRpm, tableAxisRpm.shape
+#print tableAxisMap, tableAxisMap.shape
+#print tableTemplate
+#sys.exit()
+
+#tableAccWeight = np.genfromtxt("basetable.csv", delimiter=',')
+#tableAccLambda = np.genfromtxt("basetable.csv", delimiter=',')
+#tableLambda = np.genfromtxt("basetable.csv", delimiter=',')
+tableAccWeight = np.copy(tableTemplate)
+tableAccLambda = np.copy(tableTemplate)
+tableLambda = np.copy(tableTemplate)
 
 with open(logfilename) as csvfile:
     dialect = csv.Sniffer().sniff(csvfile.read(1024))
@@ -80,9 +102,9 @@ with open(logfilename) as csvfile:
         maxDTPS = max(maxDTPS, DTPS)
 
         r = 1; m = 1
-        while r < tableAccWeight.shape[0]-1 and RPM > float(tableAccWeight[0,r]):
+        while RPM > float(tableAccWeight[0,r]):
             r += 1
-        while m < tableAccWeight.shape[1]-1 and MAP > float(tableAccWeight[m,0]):
+        while MAP > float(tableAccWeight[m,0]):
             m += 1
 
         if ETE > maxETE: # skip warm-up
@@ -91,7 +113,7 @@ with open(logfilename) as csvfile:
             ignoredDTPS += 1
         elif EGO >= maxEGO or EGO <= minEGO: # skip saturated EGO readings
             ignoredEGO += 1
-        elif r >= 11 or m >= 11 or r <= 1 or m <= 1: # TODO fix the edge cases - just skip for now
+        elif r >= tableAccWeight.shape[1]-1 or m >= tableAccWeight.shape[0]-1 or r <= 1 or m <= 1: # TODO fix the edge cases - just skip for now
             ignoredEdge += 1
         else:
             mapH = float(tableAccWeight[m,0])
@@ -136,10 +158,11 @@ with open(logfilename) as csvfile:
                 os.system('clear')
 
             n = 80; sys.stdout.write('\033[{}A'.format(n))
-            print 'Cell Weight'
-            print tableAccWeight
-            print '\nAccumulated EGO'
-            print tableAccLambda
+            if isLastDataPoint:
+                print 'Cell Weight'
+                print tableAccWeight
+                #print '\nAccumulated EGO'
+                #print tableAccLambda
             print '\nMean Lambda'
             print tableLambda
             print '\nMAP: {:3.1f}'.format(MAP), '\tRPM: {:4.0f}'.format(RPM), '\tEGO: {:1.2f}'.format(EGO), '\tTPS: {:1.2f}'.format(TPS), '\tDTPS: {:1.2f}'.format(DTPS), '\tCHT: {:1.2f}'.format(CHT), '\tETE: {:1.2f}'.format(ETE)
@@ -156,5 +179,39 @@ with open(logfilename) as csvfile:
             print '\t- EGO =', ignoredEGO, 100*ignoredEGO/ignoredPoints, '%   '
             print '\t- Edge =', ignoredEdge, 100*ignoredEdge/ignoredPoints, '%   '
 
+commandLambda = 0.95
+tableNewVE = np.zeros(tableVE.shape)
+tableDeltaVE = np.zeros(tableVE.shape)
+for (y,x), value in np.ndenumerate(tableVE):
+    if tableAccWeight[y+1,x+1] < minChangeWeight:
+        tableNewVE[y,x] = tableVE[y,x]
+        continue
+    assert value-tableVE[y,x] == 0
+    tableNewVE[y,x] = tableVE[y,x] * (tableLambda[y+1,x+1])/commandLambda ## tableLambda offset by 1 to skip axis values
+    tableDeltaVE[y,x] = tableNewVE[y,x] - tableVE[y,x]
+
+print 'tableVE\n', tableVE
+print 'tableDeltaVE\n', tableDeltaVE
+print 'tableNewVE\n', tableNewVE
 
 
+if args.plot:
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+    from matplotlib import cm
+    from matplotlib.ticker import LinearLocator, FormatStrFormatter
+    fig = plt.figure()
+    ax = Axes3D(fig)
+    #Z = tableLambda[1:tableLambda.shape[0],1:tableLambda.shape[1]]
+    Z = tableNewVE
+    X = tableLambda[1:Z.shape[0]+1,0]
+    Y = tableLambda[0,1:Z.shape[1]+1]
+
+    X, Y = np.meshgrid(X, Y)
+    X = np.transpose(X)
+    Y = np.transpose(Y)
+
+    print X.shape, Y.shape, Z.shape
+
+    ax.plot_surface(X, Y, Z, rstride=1, cstride=1, cmap=cm.coolwarm, linewidth=0, antialiased=False)
+    plt.show()
